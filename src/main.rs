@@ -1,0 +1,3 @@
+mod graphql;
+
+fn main() {}
