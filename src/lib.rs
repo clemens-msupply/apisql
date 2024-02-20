@@ -5,6 +5,7 @@ use rusqlite::ffi;
 use rusqlite::{to_sqlite_error, Connection, Result};
 
 mod graphql;
+mod parse_query;
 
 #[cfg(feature = "loadable_extension")]
 fn extension_init(db: *mut ffi::sqlite3, p_api: *mut ffi::sqlite3_api_routines) -> Result<()> {

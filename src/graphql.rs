@@ -15,6 +15,8 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::parse_query::{parse_query_variable, Variable};
+
 /// Register the "graphql" module.
 /// ```sql
 /// CREATE VIRTUAL TABLE vtab USING graphql(
@@ -37,7 +39,7 @@ struct Config {
     operation_name: String,
     query: String,
 
-    variable_names: Vec<String>,
+    variables: Vec<Variable>,
 }
 
 impl Config {
@@ -55,6 +57,7 @@ impl Config {
                 "no Graphql `query` specified".to_owned(),
             ));
         }
+
         Ok(())
     }
 }
@@ -99,17 +102,22 @@ unsafe impl<'vtab> VTab<'vtab> for GraphQLTab {
                 "url" => vtab.config.url = value.to_owned(),
                 "operationName" => vtab.config.operation_name = value.to_owned(),
                 "query" => vtab.config.query = value.to_owned(),
-                "variableNames" => {
-                    vtab.config.variable_names = serde_json::from_str(value)
-                        .map_err(|err| Error::ModuleError(format!("{}", err)))?
-                }
+
                 _ => {}
             }
         }
 
         vtab.config.validate()?;
+        vtab.config.variables =
+            parse_query_variable(&vtab.config.query, &vtab.config.operation_name)
+                .map_err(|err| Error::ModuleError(err.to_string()))?;
 
-        let mut cols: Vec<String> = vtab.config.variable_names.clone();
+        let mut cols: Vec<String> = vtab
+            .config
+            .variables
+            .iter()
+            .map(|it| it.name.clone())
+            .collect();
         cols.push("token".to_string());
 
         let mut sql = String::from("CREATE TABLE x(");
@@ -141,7 +149,7 @@ unsafe impl<'vtab> VTab<'vtab> for GraphQLTab {
 
         let mut param_details = ParameterDetails::new();
         for (i, constraint) in info.constraints().enumerate() {
-            if i >= self.config.variable_names.len() {
+            if i >= self.config.variables.len() {
                 break;
             }
             param_details.push(ParameterDetail {
@@ -204,12 +212,12 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
             .unwrap_or(vec![]);
         let mut variables = serde_json::Map::new();
         for (i, param) in params_details.iter().enumerate() {
-            let Some(config_param) = self.config.variable_names.get(param.col) else {
+            let Some(config_param) = self.config.variables.get(param.col) else {
                 continue;
             };
             variables.insert(
-                config_param.clone(),
-                serde_json::Value::String(args.get(i).unwrap()),
+                config_param.name.clone(),
+                serde_json::Value::String(args.get(i)?),
             );
         }
 
@@ -238,12 +246,12 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
             .unwrap_or(&Value::Null);
         let mut row = vec![];
 
-        for (i, _) in self.config.variable_names.iter().enumerate() {
+        for (i, _) in self.config.variables.iter().enumerate() {
             let Some(parameter_idx) = params_details.iter().position(|d| d.col == i) else {
                 row.push(Value::Null);
                 continue;
             };
-            row.push(serde_json::Value::String(args.get(parameter_idx).unwrap()));
+            row.push(serde_json::Value::String(args.get(parameter_idx)?));
         }
         row.push(token.clone());
         self.rows.push(row);
@@ -282,7 +290,6 @@ mod test {
     use crate::graphql;
     use fallible_iterator::FallibleIterator;
     use rusqlite::{Connection, Result};
-    use serde_json::json;
 
     #[test]
     fn test_graphql_module() -> Result<()> {
@@ -299,11 +306,10 @@ mod test {
           }
         }
         "#;
-        let variable_names = json!(["password_eq", "username_eq"]);
         db.execute_batch(&format!(
             "CREATE VIRTUAL TABLE vtab USING graphql(url='http://localhost:8000/graphql',
-                operationName='{}', query='{}', variableNames='{}')",
-            operation_name, query_str, variable_names
+                operationName='{}', query='{}')",
+            operation_name, query_str
         ))?;
 
         {
