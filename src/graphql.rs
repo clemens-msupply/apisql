@@ -15,7 +15,7 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::parse_query::{parse_query_variable, Variable};
+use crate::parse_query::{parse, QueryDetails, ResultPath, Variable};
 
 /// Register the "graphql" module.
 /// ```sql
@@ -35,22 +35,16 @@ pub fn load_module(conn: &Connection) -> Result<()> {
 #[derive(Default, Clone)]
 struct Config {
     url: String,
-
-    operation_name: String,
     query: String,
 
-    variables: Vec<Variable>,
+    /// Values derived from the query string
+    query_details: QueryDetails,
 }
 
 impl Config {
     pub fn validate(&self) -> Result<()> {
         if self.url.is_empty() {
             return Err(Error::ModuleError("no server `url` specified".to_owned()));
-        }
-        if self.operation_name.is_empty() {
-            return Err(Error::ModuleError(
-                "no `operationName` specified".to_owned(),
-            ));
         }
         if self.query.is_empty() {
             return Err(Error::ModuleError(
@@ -100,25 +94,25 @@ unsafe impl<'vtab> VTab<'vtab> for GraphQLTab {
             let (param, value) = parameter(c_slice)?;
             match param {
                 "url" => vtab.config.url = value.to_owned(),
-                "operationName" => vtab.config.operation_name = value.to_owned(),
                 "query" => vtab.config.query = value.to_owned(),
-
                 _ => {}
             }
         }
 
         vtab.config.validate()?;
-        vtab.config.variables =
-            parse_query_variable(&vtab.config.query, &vtab.config.operation_name)
-                .map_err(|err| Error::ModuleError(err.to_string()))?;
+        vtab.config.query_details =
+            parse(&vtab.config.query).map_err(|err| Error::ModuleError(err.to_string()))?;
 
         let mut cols: Vec<String> = vtab
             .config
+            .query_details
             .variables
             .iter()
             .map(|it| it.name.clone())
             .collect();
-        cols.push("token".to_string());
+        for result in &vtab.config.query_details.results {
+            cols.push(result.to_string());
+        }
 
         let mut sql = String::from("CREATE TABLE x(");
         for (i, col) in cols.iter().enumerate() {
@@ -149,7 +143,7 @@ unsafe impl<'vtab> VTab<'vtab> for GraphQLTab {
 
         let mut param_details = ParameterDetails::new();
         for (i, constraint) in info.constraints().enumerate() {
-            if i >= self.config.variables.len() {
+            if i >= self.config.query_details.variables.len() {
                 break;
             }
             param_details.push(ParameterDetail {
@@ -212,7 +206,7 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
             .unwrap_or(vec![]);
         let mut variables = serde_json::Map::new();
         for (i, param) in params_details.iter().enumerate() {
-            let Some(config_param) = self.config.variables.get(param.col) else {
+            let Some(config_param) = self.config.query_details.variables.get(param.col) else {
                 continue;
             };
             variables.insert(
@@ -225,7 +219,7 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
         let res = client
             .post(&self.config.url)
             .json(&json!({
-              "operationName": self.config.operation_name,
+              "operationName": self.config.query_details.operation_name,
               "query": self.config.query,
               "variables": variables
             }))
@@ -237,23 +231,30 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
         if let Some(errors) = res.get("errors") {
             return Err(Error::ModuleError(errors.to_string()));
         };
-        let token = res
-            .get("data")
-            .unwrap_or(&Value::Null)
-            .get("authToken")
-            .unwrap_or(&Value::Null)
-            .get("token")
-            .unwrap_or(&Value::Null);
+
         let mut row = vec![];
 
-        for (i, _) in self.config.variables.iter().enumerate() {
+        for (i, _) in self.config.query_details.variables.iter().enumerate() {
             let Some(parameter_idx) = params_details.iter().position(|d| d.col == i) else {
                 row.push(Value::Null);
                 continue;
             };
             row.push(serde_json::Value::String(args.get(parameter_idx)?));
         }
-        row.push(token.clone());
+
+        let operation_result = res
+            .get("data")
+            .unwrap_or(&Value::Null)
+            .get(&self.config.query_details.endpoint_name)
+            .unwrap_or(&Value::Null);
+        for expected_result in &self.config.query_details.results {
+            let value = operation_result
+                .get(&expected_result.to_string())
+                .unwrap_or(&Value::Null);
+            println!("{:?}", value);
+            row.push(value.clone());
+        }
+
         self.rows.push(row);
         Ok(())
     }
@@ -295,7 +296,6 @@ mod test {
     fn test_graphql_module() -> Result<()> {
         let db = Connection::open_in_memory()?;
         graphql::load_module(&db)?;
-        let operation_name = "MyQuery";
         let query_str = r#"
         query MyQuery($username_eq: String!, $password_eq: String!) {
           authToken(password: $password_eq, username: $username_eq) {
@@ -308,8 +308,8 @@ mod test {
         "#;
         db.execute_batch(&format!(
             "CREATE VIRTUAL TABLE vtab USING graphql(url='http://localhost:8000/graphql',
-                operationName='{}', query='{}')",
-            operation_name, query_str
+                query='{}')",
+            query_str
         ))?;
 
         {
