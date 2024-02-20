@@ -15,7 +15,7 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::parse_query::{parse, QueryDetails, ResultPath, Variable};
+use crate::parse_query::{parse, QueryDetails};
 
 /// Register the "graphql" module.
 /// ```sql
@@ -103,16 +103,19 @@ unsafe impl<'vtab> VTab<'vtab> for GraphQLTab {
         vtab.config.query_details =
             parse(&vtab.config.query).map_err(|err| Error::ModuleError(err.to_string()))?;
 
-        let mut cols: Vec<String> = vtab
+        let var_col_iter = vtab
             .config
             .query_details
             .variables
             .iter()
-            .map(|it| it.name.clone())
-            .collect();
-        for result in &vtab.config.query_details.results {
-            cols.push(result.to_string());
-        }
+            .map(|it| it.name.clone());
+        let result_col_iter = vtab
+            .config
+            .query_details
+            .results
+            .iter()
+            .map(|it| it.to_string());
+        let cols: Vec<String> = result_col_iter.chain(var_col_iter).collect();
 
         let mut sql = String::from("CREATE TABLE x(");
         for (i, col) in cols.iter().enumerate() {
@@ -141,17 +144,8 @@ unsafe impl<'vtab> VTab<'vtab> for GraphQLTab {
 
         info.set_idx_str(&serde_json::to_string(&params_info).unwrap());
 
-        let mut param_details = ParameterDetails::new();
-        for (i, constraint) in info.constraints().enumerate() {
-            if i >= self.config.query_details.variables.len() {
-                break;
-            }
-            param_details.push(ParameterDetail {
-                col: constraint.column() as usize,
-            });
-        }
-
-        for (i, _) in param_details.iter().enumerate() {
+        // just request use all constraints
+        for (i, _) in params_info.iter().enumerate() {
             info.constraint_usage(i).set_argv_index((i + 1) as c_int);
         }
 
@@ -206,7 +200,12 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
             .unwrap_or(vec![]);
         let mut variables = serde_json::Map::new();
         for (i, param) in params_details.iter().enumerate() {
-            let Some(config_param) = self.config.query_details.variables.get(param.col) else {
+            let Some(config_param) = self
+                .config
+                .query_details
+                .variables
+                .get(param.col - self.config.query_details.results.len())
+            else {
                 continue;
             };
             variables.insert(
@@ -233,15 +232,6 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
         };
 
         let mut row = vec![];
-
-        for (i, _) in self.config.query_details.variables.iter().enumerate() {
-            let Some(parameter_idx) = params_details.iter().position(|d| d.col == i) else {
-                row.push(Value::Null);
-                continue;
-            };
-            row.push(serde_json::Value::String(args.get(parameter_idx)?));
-        }
-
         let operation_result = res
             .get("data")
             .unwrap_or(&Value::Null)
@@ -253,6 +243,17 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
                 .unwrap_or(&Value::Null);
             println!("{:?}", value);
             row.push(value.clone());
+        }
+
+        for (i, _) in self.config.query_details.variables.iter().enumerate() {
+            let Some(parameter_idx) = params_details
+                .iter()
+                .position(|d| d.col == i + self.config.query_details.results.len())
+            else {
+                row.push(Value::Null);
+                continue;
+            };
+            row.push(serde_json::Value::String(args.get(parameter_idx)?));
         }
 
         self.rows.push(row);
