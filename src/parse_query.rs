@@ -1,14 +1,10 @@
-use async_graphql_parser::{
-    parse_query,
-    types::{
-        DocumentOperations, ExecutableDocument, OperationDefinition, OperationType, Selection,
-    },
+use graphql_parser::query::{
+    parse_query, Definition, Document, OperationDefinition, Query, Selection,
 };
 
 #[derive(Default, Clone)]
 pub struct Variable {
     pub name: String,
-    pub nullable: bool,
 }
 
 /// Path relative to the query
@@ -43,65 +39,62 @@ pub fn parse(full_query: &str) -> anyhow::Result<QueryDetails> {
     })
 }
 
-fn parse_query_variable(
-    full_query: &ExecutableDocument,
-) -> anyhow::Result<(OperationDefinition, String, Vec<Variable>)> {
-    let DocumentOperations::Multiple(operations) = &full_query.operations else {
-        return Err(anyhow::Error::msg(
-            "Only named queries supported for now...",
-        ));
+fn parse_query_variable<'a>(
+    full_query: &Document<'a, &'a str>,
+) -> anyhow::Result<(Query<'a, &'a str>, String, Vec<Variable>)> {
+    let Some(Definition::Operation(OperationDefinition::Query(query_op))) =
+        full_query.definitions.iter().find(|it| match it {
+            Definition::Operation(op) => match op {
+                OperationDefinition::Query(_) => true,
+                _ => false,
+            },
+            Definition::Fragment(_) => false,
+        })
+    else {
+        return Err(anyhow::Error::msg("No query operation found"));
     };
-    if operations.len() != 1 {
-        return Err(anyhow::Error::msg(
-            "Query must contain exactly one custom query",
-        ));
-    }
-    let (operation_name, op) = operations.iter().next().unwrap();
-    if op.node.ty != OperationType::Query {
-        return Err(anyhow::Error::msg(format!("Operation must be a query")));
+
+    let Some(operation_name) = query_op.name.map(|it| it.to_string()) else {
+        return Err(anyhow::Error::msg("Missing operation name"));
     };
-    let vars = op
-        .node
+
+    let vars = query_op
         .variable_definitions
         .iter()
-        .map(|it| {
-            let var = &it.node;
-            Variable {
-                name: var.name.node.to_string(),
-                nullable: var.var_type.node.nullable,
-            }
+        .map(|var| Variable {
+            name: var.name.to_string(),
         })
         .collect();
-    Ok((op.node.clone(), operation_name.to_string(), vars))
+    Ok((query_op.clone(), operation_name.to_string(), vars))
 }
 
-fn parse_query_results(op: &OperationDefinition) -> anyhow::Result<(String, Vec<ResultPath>)> {
+fn parse_query_results<'a>(op: &Query<'a, &'a str>) -> anyhow::Result<(String, Vec<ResultPath>)> {
     let mut out = Vec::new();
 
-    if op.selection_set.node.items.len() != 1 {
+    if op.selection_set.items.len() != 1 {
         return Err(anyhow::Error::msg(format!(
             "Exactly one operation expected"
         )));
     }
 
     // get operation name
-    let item = &op.selection_set.node.items.first().unwrap().node;
+    let item = op.selection_set.items.first().unwrap();
     let Selection::Field(field) = item else {
         return Err(anyhow::Error::msg(format!("Field expected ({:?})", item)));
     };
-    let operation_name = field.node.name.node.to_string();
+    let operation_name = field.name.to_string();
 
     // e.g. "... on AuthToken"
-    for item in &field.node.selection_set.node.items {
-        let Selection::InlineFragment(fragment) = &item.node else {
+    for item in &field.selection_set.items {
+        let Selection::InlineFragment(fragment) = &item else {
             return Err(anyhow::Error::msg(format!(
                 "InlineFragment expected for ({:?})",
                 item
             )));
         };
 
-        for item in &fragment.node.selection_set.node.items {
-            let Selection::Field(field) = &item.node else {
+        for item in &fragment.selection_set.items {
+            let Selection::Field(field) = &item else {
                 return Err(anyhow::Error::msg(format!(
                     "Only simple field supported ({:?})",
                     item
@@ -110,7 +103,7 @@ fn parse_query_results(op: &OperationDefinition) -> anyhow::Result<(String, Vec<
 
             // TODO support nested path
             out.push(ResultPath {
-                path: vec![field.node.name.node.to_string()],
+                path: vec![field.name.to_string()],
             });
         }
     }

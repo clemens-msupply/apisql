@@ -241,10 +241,10 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
             let value = operation_result
                 .get(&expected_result.to_string())
                 .unwrap_or(&Value::Null);
-            println!("{:?}", value);
             row.push(value.clone());
         }
 
+        // Fill in the query parameters
         for (i, _) in self.config.query_details.variables.iter().enumerate() {
             let Some(parameter_idx) = params_details
                 .iter()
