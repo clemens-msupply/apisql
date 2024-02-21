@@ -53,7 +53,11 @@ pub fn optimize_query<'a>(query: &'a str, used_col: u64) -> anyhow::Result<Strin
         }
         let items = &mut fragment.selection_set.items;
         for index_to_remove in items_to_remove.into_iter().rev() {
-            // TODO handle case when we removed all items
+            // TODO handle this case better?
+            // Don't remove all items to keep the query valid
+            if items.len() == 1 {
+                break;
+            }
             items.remove(index_to_remove);
         }
     }
