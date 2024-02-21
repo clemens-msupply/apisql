@@ -226,9 +226,8 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
         }
 
         let client = reqwest::blocking::Client::new();
-        //let query = optimize_query(&self.config.query, query_info.col_used)
-        //   .map_err(|err| Error::ModuleError(err.to_string()))?;
-        let query = &self.config.query;
+        let query = optimize_query(&self.config.query, query_info.col_used)
+            .map_err(|err| Error::ModuleError(err.to_string()))?;
         println!("API Request:\n{query}");
         let res = client
             .post(&self.config.url)
@@ -403,8 +402,10 @@ mod test {
         query Query {
             allFilms {
                 films {
+                    id
                     title
                     director
+                    edited
                 }
             }
         }
@@ -418,7 +419,7 @@ mod test {
         {
             let mut s = db.prepare("SELECT * FROM films")?;
 
-            let results: Vec<String> = s.query([])?.map(|row| row.get::<_, String>(0)).collect()?;
+            let results: Vec<String> = s.query([])?.map(|row| row.get::<_, String>(1)).collect()?;
             println!("Results: {results:?}");
             assert_eq!(results.len(), 6);
         }
