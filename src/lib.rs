@@ -5,6 +5,7 @@ use rusqlite::ffi;
 use rusqlite::{to_sqlite_error, Connection, Result};
 
 mod graphql;
+mod optimize_query;
 mod parse_query;
 
 #[cfg(feature = "loadable_extension")]

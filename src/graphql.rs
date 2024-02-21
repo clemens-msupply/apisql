@@ -15,7 +15,10 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::parse_query::{parse, QueryDetails};
+use crate::{
+    optimize_query::optimize_query,
+    parse_query::{parse, QueryDetails},
+};
 
 /// Register the "graphql" module.
 /// ```sql
@@ -62,7 +65,11 @@ struct ParameterDetail {
     col: usize,
 }
 
-type ParameterDetails = Vec<ParameterDetail>;
+#[derive(Serialize, Deserialize)]
+struct QueryInfo {
+    pub params: Vec<ParameterDetail>,
+    pub col_used: u64,
+}
 
 #[repr(C)]
 struct GraphQLTab {
@@ -135,17 +142,20 @@ unsafe impl<'vtab> VTab<'vtab> for GraphQLTab {
 
     // Only a forward full table scan is supported.
     fn best_index(&self, info: &mut IndexInfo) -> Result<()> {
-        let params_info: ParameterDetails = info
-            .constraints()
-            .map(|c| ParameterDetail {
-                col: c.column() as usize,
-            })
-            .collect::<Vec<_>>();
+        let query_info = QueryInfo {
+            params: info
+                .constraints()
+                .map(|c| ParameterDetail {
+                    col: c.column() as usize,
+                })
+                .collect::<Vec<_>>(),
+            col_used: info.col_used(),
+        };
 
-        info.set_idx_str(&serde_json::to_string(&params_info).unwrap());
+        info.set_idx_str(&serde_json::to_string(&query_info).unwrap());
 
         // just request use all constraints
-        for (i, _) in params_info.iter().enumerate() {
+        for (i, _) in query_info.params.iter().enumerate() {
             info.constraint_usage(i).set_argv_index((i + 1) as c_int);
         }
 
@@ -195,11 +205,11 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
         self.rows.clear();
         self.row_number = 0;
 
-        let params_details = idx_str
-            .map(|s| serde_json::from_str::<ParameterDetails>(s).unwrap())
-            .unwrap_or(vec![]);
+        let query_info = idx_str
+            .map(|s| serde_json::from_str::<QueryInfo>(s).unwrap())
+            .unwrap();
         let mut variables = serde_json::Map::new();
-        for (i, param) in params_details.iter().enumerate() {
+        for (i, param) in query_info.params.iter().enumerate() {
             let Some(config_param) = self
                 .config
                 .query_details
@@ -215,11 +225,13 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
         }
 
         let client = reqwest::blocking::Client::new();
+        let query = optimize_query(&self.config.query, query_info.col_used)
+            .map_err(|err| Error::ModuleError(err.to_string()))?;
         let res = client
             .post(&self.config.url)
             .json(&json!({
               "operationName": self.config.query_details.operation_name,
-              "query": self.config.query,
+              "query": query,
               "variables": variables
             }))
             .send()
@@ -246,7 +258,8 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
 
         // Fill in the query parameters
         for (i, _) in self.config.query_details.variables.iter().enumerate() {
-            let Some(parameter_idx) = params_details
+            let Some(parameter_idx) = query_info
+                .params
                 .iter()
                 .position(|d| d.col == i + self.config.query_details.results.len())
             else {
@@ -317,12 +330,9 @@ mod test {
             let mut s =
                 db.prepare("SELECT rowid, token, password_eq, username_eq FROM vtab WHERE password_eq = '' AND username_eq = ''")?;
 
-            let result = s.query([])?;
-            for row in result.mapped(|row| Ok(format!("{:?}", row))) {
-                println!("{:?}", row.unwrap());
-            }
-            let tokens: Vec<String> = s.query([])?.map(|row| row.get::<_, String>(1)).collect()?;
-            let token = tokens.get(0).unwrap().clone();
+            let results: Vec<String> = s.query([])?.map(|row| row.get::<_, String>(0)).collect()?;
+            println!("Results: {results:?}");
+            let token = results.get(0).unwrap().clone();
             assert!(!token.is_empty());
         }
         db.execute_batch("DROP TABLE vtab")?;

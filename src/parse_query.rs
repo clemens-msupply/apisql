@@ -28,8 +28,8 @@ pub struct QueryDetails {
 }
 
 pub fn parse(full_query: &str) -> anyhow::Result<QueryDetails> {
-    let result = parse_query(full_query)?;
-    let (op, operation_name, variables) = parse_query_variable(&result)?;
+    let mut result = parse_query(full_query)?;
+    let (op, operation_name, variables) = parse_query_variable(&mut result)?;
     let (endpoint_name, results) = parse_query_results(&op)?;
     Ok(QueryDetails {
         operation_name,
@@ -39,9 +39,9 @@ pub fn parse(full_query: &str) -> anyhow::Result<QueryDetails> {
     })
 }
 
-fn parse_query_variable<'a>(
-    full_query: &Document<'a, &'a str>,
-) -> anyhow::Result<(Query<'a, &'a str>, String, Vec<Variable>)> {
+pub fn parse_query_variable<'a>(
+    full_query: &'a Document<'a, &'a str>,
+) -> anyhow::Result<(&'a Query<'a, &'a str>, String, Vec<Variable>)> {
     let Some(Definition::Operation(OperationDefinition::Query(query_op))) =
         full_query.definitions.iter().find(|it| match it {
             Definition::Operation(op) => match op {
@@ -65,7 +65,7 @@ fn parse_query_variable<'a>(
             name: var.name.to_string(),
         })
         .collect();
-    Ok((query_op.clone(), operation_name.to_string(), vars))
+    Ok((query_op, operation_name.to_string(), vars))
 }
 
 fn parse_query_results<'a>(op: &Query<'a, &'a str>) -> anyhow::Result<(String, Vec<ResultPath>)> {
