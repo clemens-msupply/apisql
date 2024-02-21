@@ -145,6 +145,7 @@ unsafe impl<'vtab> VTab<'vtab> for GraphQLTab {
         let query_info = QueryInfo {
             params: info
                 .constraints()
+                .filter(|c| c.column() as usize >= self.config.query_details.results.len())
                 .map(|c| ParameterDetail {
                     col: c.column() as usize,
                 })
