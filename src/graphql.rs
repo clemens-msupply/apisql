@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use crate::{
     optimize_query::optimize_query,
-    parse_query::{parse, QueryDetails},
+    parse_query::{parse, QueryDetails, ResultPath},
 };
 
 /// Register the "graphql" module.
@@ -225,8 +225,9 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
         }
 
         let client = reqwest::blocking::Client::new();
-        let query = optimize_query(&self.config.query, query_info.col_used)
-            .map_err(|err| Error::ModuleError(err.to_string()))?;
+        //let query = optimize_query(&self.config.query, query_info.col_used)
+        //   .map_err(|err| Error::ModuleError(err.to_string()))?;
+        let query = &self.config.query;
         let res = client
             .post(&self.config.url)
             .json(&json!({
@@ -243,33 +244,86 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
             return Err(Error::ModuleError(errors.to_string()));
         };
 
-        let mut row = vec![];
         let operation_result = res
             .get("data")
             .unwrap_or(&Value::Null)
             .get(&self.config.query_details.endpoint_name)
             .unwrap_or(&Value::Null);
+
+        // find first array
+        let mut found_array: Option<ResultPath> = None;
+        let mut array_value: Option<&Value> = None;
         for expected_result in &self.config.query_details.results {
-            let value = operation_result
-                .get(&expected_result.to_string())
-                .unwrap_or(&Value::Null);
-            row.push(value.clone());
+            let mut value = operation_result;
+            let mut current = vec![];
+            for path in &expected_result.path {
+                current.push(path.clone());
+                value = value.get(&path).unwrap_or(&Value::Null);
+                if !value.is_array() {
+                    continue;
+                }
+                found_array = Some(ResultPath { path: current });
+                array_value = Some(value);
+                break;
+            }
+            if found_array.is_some() {
+                break;
+            }
+        }
+        // build template row with none array elements
+        let mut template_row = vec![];
+        for expected_result in &self.config.query_details.results {
+            if let Some(found_array) = &found_array {
+                if expected_result.to_string() == found_array.to_string() {
+                    template_row.push(Value::Null);
+                    continue;
+                }
+            }
+            let mut value = operation_result;
+            for path in &expected_result.path {
+                value = value.get(&path).unwrap_or(&Value::Null);
+            }
+            template_row.push(value.clone());
+        }
+
+        if found_array.is_none() {
+            self.rows.push(template_row);
+        } else {
+            let array = array_value.unwrap().as_array().unwrap();
+            let found_array = found_array.unwrap();
+            let found_array_str = found_array.to_string();
+            for (i, array_element) in array.iter().enumerate() {
+                let mut row = vec![];
+                for expected_result in &self.config.query_details.results {
+                    if expected_result.to_string().starts_with(&found_array_str) {
+                        let mut value = array_element;
+                        for path in expected_result.path.iter().skip(found_array.path.len()) {
+                            value = value.get(&path).unwrap_or(&Value::Null);
+                        }
+                        row.push(value.clone());
+                    } else {
+                        row.push(template_row[i].clone());
+                    }
+                }
+                self.rows.push(row);
+            }
         }
 
         // Fill in the query parameters
-        for (i, _) in self.config.query_details.variables.iter().enumerate() {
-            let Some(parameter_idx) = query_info
-                .params
-                .iter()
-                .position(|d| d.col == i + self.config.query_details.results.len())
-            else {
-                row.push(Value::Null);
-                continue;
-            };
-            row.push(serde_json::Value::String(args.get(parameter_idx)?));
+        for row in self.rows.iter_mut() {
+            for (i, _) in self.config.query_details.variables.iter().enumerate() {
+                let Some(parameter_idx) = query_info
+                    .params
+                    .iter()
+                    .position(|d| d.col == i + self.config.query_details.results.len())
+                else {
+                    row.push(Value::Null);
+                    continue;
+                };
+                row.push(serde_json::Value::String(args.get(parameter_idx)?));
+            }
         }
 
-        self.rows.push(row);
         Ok(())
     }
 
@@ -336,6 +390,37 @@ mod test {
             assert!(!token.is_empty());
         }
         db.execute_batch("DROP TABLE vtab")?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_query() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        graphql::load_module(&db)?;
+        let query_str = r#"
+        query Query {
+            allFilms {
+                films {
+                    title
+                    director
+                }
+            }
+        }
+        "#;
+        db.execute_batch(&format!(
+            "CREATE VIRTUAL TABLE films USING graphql(url='https://swapi-graphql.netlify.app/.netlify/functions/index',
+                query='{}')",
+            query_str
+        ))?;
+
+        {
+            let mut s = db.prepare("SELECT * FROM films")?;
+
+            let results: Vec<String> = s.query([])?.map(|row| row.get::<_, String>(0)).collect()?;
+            println!("Results: {results:?}");
+            assert_eq!(results.len(), 6);
+        }
+        db.execute_batch("DROP TABLE films")?;
         Ok(())
     }
 }

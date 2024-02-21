@@ -1,5 +1,5 @@
 use graphql_parser::query::{
-    parse_query, Definition, Document, OperationDefinition, Query, Selection,
+    parse_query, Definition, Document, OperationDefinition, Query, Selection, SelectionSet,
 };
 
 #[derive(Default, Clone)]
@@ -10,7 +10,7 @@ pub struct Variable {
 /// Path relative to the query
 #[derive(Default, Clone)]
 pub struct ResultPath {
-    path: Vec<String>,
+    pub path: Vec<String>,
 }
 
 impl ResultPath {
@@ -68,9 +68,36 @@ pub fn parse_query_variable<'a>(
     Ok((query_op, operation_name.to_string(), vars))
 }
 
-fn parse_query_results<'a>(op: &Query<'a, &'a str>) -> anyhow::Result<(String, Vec<ResultPath>)> {
+fn collect_fields<'a>(
+    selection_set: &SelectionSet<'a, &'a str>,
+    base: &Vec<String>,
+) -> anyhow::Result<Vec<ResultPath>> {
     let mut out = Vec::new();
+    for item in &selection_set.items {
+        match item {
+            Selection::Field(field) => {
+                let mut path = base.clone();
+                path.push(field.name.to_string());
+                if field.selection_set.items.is_empty() {
+                    out.push(ResultPath { path });
+                } else {
+                    out.append(&mut collect_fields(&field.selection_set, &path)?);
+                }
+            }
+            Selection::InlineFragment(inline_fragment) => {
+                // e.g. "... on AuthToken"
+                let mut paths = collect_fields(&inline_fragment.selection_set, base)?;
+                out.append(&mut paths);
+            }
+            Selection::FragmentSpread(_) => {
+                return Err(anyhow::Error::msg(format!("FragmentSpread not supported")));
+            }
+        };
+    }
+    Ok(out)
+}
 
+fn parse_query_results<'a>(op: &Query<'a, &'a str>) -> anyhow::Result<(String, Vec<ResultPath>)> {
     if op.selection_set.items.len() != 1 {
         return Err(anyhow::Error::msg(format!(
             "Exactly one operation expected"
@@ -84,29 +111,6 @@ fn parse_query_results<'a>(op: &Query<'a, &'a str>) -> anyhow::Result<(String, V
     };
     let operation_name = field.name.to_string();
 
-    // e.g. "... on AuthToken"
-    for item in &field.selection_set.items {
-        let Selection::InlineFragment(fragment) = &item else {
-            return Err(anyhow::Error::msg(format!(
-                "InlineFragment expected for ({:?})",
-                item
-            )));
-        };
-
-        for item in &fragment.selection_set.items {
-            let Selection::Field(field) = &item else {
-                return Err(anyhow::Error::msg(format!(
-                    "Only simple field supported ({:?})",
-                    item
-                )));
-            };
-
-            // TODO support nested path
-            out.push(ResultPath {
-                path: vec![field.name.to_string()],
-            });
-        }
-    }
-
+    let out = collect_fields(&field.selection_set, &vec![])?;
     Ok((operation_name, out))
 }
