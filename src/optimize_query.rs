@@ -63,7 +63,5 @@ pub fn optimize_query<'a>(query: &'a str, used_col: u64) -> anyhow::Result<Strin
     }
 
     let output = format!("{parse_result}");
-    println!("Request Query:");
-    println!("{output}");
     Ok(output)
 }

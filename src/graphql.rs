@@ -228,6 +228,7 @@ unsafe impl VTabCursor for GraphqlTabCursor<'_> {
         //let query = optimize_query(&self.config.query, query_info.col_used)
         //   .map_err(|err| Error::ModuleError(err.to_string()))?;
         let query = &self.config.query;
+        println!("API Request:\n{query}")
         let res = client
             .post(&self.config.url)
             .json(&json!({
