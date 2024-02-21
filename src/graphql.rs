@@ -376,7 +376,7 @@ mod test {
         }
         "#;
         db.execute_batch(&format!(
-            "CREATE VIRTUAL TABLE vtab USING graphql(url='http://localhost:8000/graphql',
+            "CREATE VIRTUAL TABLE auth_token USING graphql(url='http://localhost:8000/graphql',
                 query='{}')",
             query_str
         ))?;
@@ -390,7 +390,7 @@ mod test {
             let token = results.get(0).unwrap().clone();
             assert!(!token.is_empty());
         }
-        db.execute_batch("DROP TABLE vtab")?;
+        db.execute_batch("DROP TABLE auth_token")?;
         Ok(())
     }
 
